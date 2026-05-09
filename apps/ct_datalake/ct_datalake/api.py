@@ -1,0 +1,318 @@
+import frappe
+import os
+import json
+import tempfile
+from typing import Literal, Optional, List
+
+# ─── internal modules ───────────────────────────────────────────────
+from .search import search as faiss_search
+from .llm_rerank import rerank
+from .jd_match import (
+    match_jd,
+    normalize_candidate,
+    parse_jd,
+    extract_text_from_upload as _extract_text,
+)
+from .ai_matching import extract_keywords, load_datasets, search_domain
+from sentence_transformers import SentenceTransformer
+from openai import OpenAI
+from . import ai_matching as _rc
+
+# ─── OpenAI client ──────────────────────────────────────────────────
+_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+gpt_client = OpenAI(api_key=_api_key) if _api_key else None
+
+# ─── Lazy-load heavy resources once ─────────────────────────────────
+_embed_model: Optional[SentenceTransformer] = None
+_datasets: Optional[dict] = None
+
+def get_embed_model() -> SentenceTransformer:
+    global _embed_model
+    if _embed_model is None:
+        _embed_model = SentenceTransformer("intfloat/multilingual-e5-base")
+    return _embed_model
+
+def get_datasets() -> dict:
+    global _datasets
+    if _datasets is None:
+        _datasets = load_datasets()
+    return _datasets
+
+# ════════════════════════════════════════════════════════════════════
+# ROUTES (Frappe Whitelisted)
+# ════════════════════════════════════════════════════════════════════
+
+# ── Health check ────────────────────────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def root():
+    """Kiểm tra trạng thái API"""
+    return {
+        "status": "ok",
+        "service": "AI Candidate Search API (Frappe)",
+        "version": "1.0.0",
+        "endpoints": [
+            "/api/method/ct_datalake.ct_datalake.api.root",
+            "/api/method/ct_datalake.ct_datalake.api.health",
+            "/api/method/ct_datalake.ct_datalake.api.semantic_search",
+            "/api/method/ct_datalake.ct_datalake.api.semantic_search_llm",
+            "/api/method/ct_datalake.ct_datalake.api.jd_match",
+            "/api/method/ct_datalake.ct_datalake.api.jd_match_upload",
+            "/api/method/ct_datalake.ct_datalake.api.g600_analyze",
+        ],
+    }
+
+@frappe.whitelist(allow_guest=True)
+def health():
+    """Health check chi tiết"""
+    return {
+        "status": "healthy",
+        "openai_configured": bool(_api_key),
+        "embed_model_loaded": _embed_model is not None,
+        "datasets_loaded": _datasets is not None,
+    }
+
+# ── Semantic Search (FAISS) ─────────────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def semantic_search(query: str, mode: str = "in", top_k: int = 5):
+    """
+    Tìm kiếm ứng viên sử dụng FAISS semantic search.
+    """
+    try:
+        top_k = int(top_k)
+        raw = faiss_search(query=query, mode=mode, top_k=top_k)
+    except Exception as e:
+        frappe.throw(f"Search error: {str(e)}")
+
+    results = []
+    for r in raw:
+        norm = normalize_candidate(r["data"], mode)
+        results.append({
+            "faiss_score": round(r["score"], 4),
+            "candidate": norm,
+            "raw": r["data"],
+        })
+
+    return {
+        "query": query,
+        "mode": mode,
+        "total": len(results),
+        "results": results,
+    }
+
+# ── Semantic Search (LLM Rerank) ────────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def semantic_search_llm(query: str, mode: str = "in", top_k: int = 5):
+    """
+    Tìm kiếm FAISS rồi đưa kết quả vào LLM để phân tích.
+    """
+    if not gpt_client:
+        frappe.throw("OPENAI_API_KEY chưa được cấu hình")
+
+    try:
+        top_k = int(top_k)
+        raw = faiss_search(
+            query=query,
+            mode=mode,
+            top_k=max(top_k * 2, 10)
+        )
+    except Exception as e:
+        frappe.throw(f"Search error: {str(e)}")
+
+    if not raw:
+        return {"query": query, "mode": mode, "total_found": 0, "llm_analysis": ""}
+
+    try:
+        analysis = rerank(query=query, candidates=raw[:top_k], mode=mode)
+    except Exception as e:
+        frappe.throw(f"LLM rerank error: {str(e)}")
+
+    return {
+        "query": query,
+        "mode": mode,
+        "total_found": len(raw),
+        "candidates_sent_to_llm": top_k,
+        "llm_analysis": analysis,
+    }
+
+# ── JD Matching (via form fields) ───────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def jd_match(jd_text: str, mode: str = "in", top_k: int = 5, fast: bool = False):
+    """
+    Match JD với ứng viên.
+    """
+    if not gpt_client and not frappe.parse_json(fast):
+        frappe.throw("OPENAI_API_KEY chưa cấu hình. Dùng fast=true để chỉ dùng FAISS.")
+
+    try:
+        top_k = int(top_k)
+        fast = frappe.parse_json(fast)
+        result = match_jd(
+            jd_text=jd_text,
+            mode=mode,
+            top_k=top_k,
+            fast=fast,
+        )
+    except Exception as e:
+        frappe.throw(f"JD match error: {str(e)}")
+
+    return {
+        "parsed_jd": result.get("parsed_jd", {}),
+        "total_found": result.get("total_found", 0),
+        "candidates": result.get("candidates", []),
+    }
+
+# ── JD Matching (File Upload) ───────────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def jd_match_upload():
+    """
+    Upload file JD → extract text → match ứng viên.
+    Sử dụng frappe.request.files
+    """
+    if not frappe.request.files:
+        frappe.throw("Chưa có file nào được upload")
+
+    file = frappe.request.files.get("file")
+    if not file:
+        frappe.throw("Vui lòng upload file với key 'file'")
+
+    mode = frappe.form_dict.get("mode", "in")
+    top_k = int(frappe.form_dict.get("top_k", 5))
+    fast = frappe.parse_json(frappe.form_dict.get("fast", "false"))
+
+    allowed = (".txt", ".md", ".pdf", ".docx")
+    name = (file.filename or "").lower()
+    if not any(name.endswith(ext) for ext in allowed):
+        frappe.throw(f"Định dạng không hỗ trợ. Chỉ chấp nhận: {', '.join(allowed)}")
+
+    # Tạo mock object để tái dùng hàm extract_text_from_upload
+    class _MockUpload:
+        def __init__(self, name, data):
+            self.name = name
+            self._data = data
+        def read(self):
+            return self._data
+
+    try:
+        jd_text = _extract_text(_MockUpload(file.filename, file.stream.read()))
+    except Exception as e:
+        frappe.throw(str(e))
+
+    try:
+        result = match_jd(
+            jd_text=jd_text,
+            mode=mode,
+            top_k=top_k,
+            fast=fast,
+        )
+    except Exception as e:
+        frappe.throw(f"JD match error: {str(e)}")
+
+    return {
+        "parsed_jd": result.get("parsed_jd", {}),
+        "total_found": result.get("total_found", 0),
+        "candidates": result.get("candidates", []),
+    }
+
+# ── G600 PDF Analysis ────────────────────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def g600_analyze():
+    """
+    Upload PDF tờ trình G600 → GPT-4o Vision đọc và trích xuất lĩnh vực.
+    """
+    if not gpt_client:
+        frappe.throw("OPENAI_API_KEY chưa được cấu hình")
+
+    if not frappe.request.files:
+        frappe.throw("Chưa có file nào được upload")
+
+    file = frappe.request.files.get("file")
+    if not file:
+        frappe.throw("Vui lòng upload file với key 'file'")
+
+    source = frappe.form_dict.get("source", "both")
+    top_k = int(frappe.form_dict.get("top_k", 5))
+    score_threshold = float(frappe.form_dict.get("score_threshold", 0.40))
+
+    if not (file.filename or "").lower().endswith(".pdf"):
+        frappe.throw("Chỉ chấp nhận file PDF")
+
+    file_bytes = file.stream.read()
+
+    # Ghi PDF tạm thời
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        domains = extract_keywords(tmp_path, gpt_client)
+    except Exception as e:
+        frappe.throw(f"GPT Vision error: {str(e)}")
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not domains:
+        frappe.throw("GPT không trích xuất được lĩnh vực nào từ PDF")
+
+    datasets = get_datasets()
+    embed_model = get_embed_model()
+
+    if source == "in":
+        active = {k: v for k, v in datasets.items() if k == "in"}
+    elif source == "out":
+        active = {k: v for k, v in datasets.items() if k == "out"}
+    else:
+        active = datasets
+
+    if not active:
+        frappe.throw("Không tìm thấy FAISS index. Kiểm tra file index.faiss / index_out.faiss")
+
+    _rc.TOP_K = top_k
+    _rc.SCORE_THRESHOLD = score_threshold
+
+    domain_results = []
+    for domain in domains:
+        hits = search_domain(domain, active, embed_model)
+        candidates = []
+        for hit in hits:
+            d = hit["data"]
+            mode = hit["mode"]
+            norm = normalize_candidate(d, mode)
+            candidates.append({
+                "source": "🌐 Google Scholar" if mode == "out" else "🏫 Nội bộ",
+                "faiss_score": hit["score"],
+                "candidate": norm,
+                "raw": d,
+            })
+
+        domain_results.append({
+            "domain_name": domain["name"],
+            "query_vi": domain.get("query_vi", ""),
+            "query_en": domain.get("query_en", ""),
+            "keywords_vi": domain.get("keywords_vi", []),
+            "keywords_en": domain.get("keywords_en", []),
+            "total_candidates": len(candidates),
+            "candidates": candidates,
+        })
+
+    return {
+        "source": source,
+        "top_k_per_domain": top_k,
+        "score_threshold": score_threshold,
+        "total_domains": len(domain_results),
+        "domains": domain_results,
+    }
+
+# ── Parse JD only ────────────────────────────────────────────────────
+@frappe.whitelist(allow_guest=True)
+def jd_parse_only(query: str):
+    """
+    Gửi JD text → GPT phân tích.
+    """
+    if not gpt_client:
+        frappe.throw("OPENAI_API_KEY chưa cấu hình")
+    try:
+        parsed = parse_jd(query)
+    except Exception as e:
+        frappe.throw(str(e))
+    return {"parsed_jd": parsed}

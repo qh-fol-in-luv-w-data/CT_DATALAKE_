@@ -1,0 +1,11 @@
+frappe==15.0.0
+openai
+faiss-cpu
+numpy
+sentence-transformers
+deep-translator
+PyMuPDF
+pypdf
+python-docx
+streamlit
+requests

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  frappe-api:
+    build: .
+    container_name: ct_datalake_frappe
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    # In a real Frappe environment, this would be 'bench start' or 'gunicorn'
+    # For now, we point to the Frappe app logic
+    command: python -m frappe.utils.bench_helper frappe serve --port 8000
+    restart: unless-stopped
+
+  streamlit-web:
+    build: .
+    container_name: ct_datalake_web
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - API_URL=http://frappe-api:8000
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    depends_on:
+      - frappe-api
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+openai
+faiss-cpu
+numpy
+sentence-transformers
+deep-translator
+PyMuPDF
+pypdf
+python-docx
