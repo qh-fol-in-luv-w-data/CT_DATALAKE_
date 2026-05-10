@@ -15,17 +15,12 @@ services:
     command: python -m frappe.utils.bench_helper frappe serve --port 8000
     restart: unless-stopped
 
-  streamlit-web:
-    build: .
-    container_name: ct_datalake_web
+  frontend:
+    build:
+      context: ./frontend
+    container_name: ct_datalake_frontend
     ports:
-      - "8501:8501"
-    volumes:
-      - .:/app
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - API_URL=http://frappe-api:8000
-    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+      - "80:80"
     depends_on:
       - frappe-api
     restart: unless-stopped

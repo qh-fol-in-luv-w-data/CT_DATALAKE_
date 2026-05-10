@@ -1,17 +1,18 @@
-# CT DataLake - AI Semantic Search (Frappe v15)
+# CT DataLake - AI Semantic Search (Frappe v15 + Vue 3)
 
-Dự án này là một hệ thống tìm kiếm ngữ nghĩa (Semantic Search) tích hợp trí tuệ nhân tạo, được chuyển đổi từ FastAPI sang **Frappe Framework v15**.
+Dự án này là một hệ thống tìm kiếm ngữ nghĩa (Semantic Search) tích hợp trí tuệ nhân tạo, được xây dựng trên **Frappe Framework v15** và frontend **Vue.js 3**.
 
 ## Thành phần chính
 - **Backend (Frappe v15)**: Chứa logic tìm kiếm FAISS, LLM Reranking, JD Matching và G600 Analysis dưới dạng các whitelisted API của Frappe.
-- **Frontend (Streamlit)**: Giao diện người dùng gọi API từ Frappe Backend.
+- **Frontend (Vue 3 + Vite)**: Giao diện người dùng hiện đại, tốc độ cao, gọi API từ Frappe Backend.
 - **AI Logic**: Sử dụng FAISS, Sentence-Transformers, và OpenAI GPT-4o.
 
 ## Cấu trúc thư mục mới
 - `apps/ct_datalake/`: Chứa mã nguồn của Frappe App.
   - `ct_datalake/api.py`: Các API chính được whitelisted.
   - `ct_datalake/*.py`: Core logic (search, match, rerank).
-- `Dockerfile` & `docker-compose.yml`: Cấu hình container hóa cho Frappe và Streamlit.
+- `frontend/`: Chứa mã nguồn frontend Vue 3.
+- `Dockerfile` & `docker-compose.yml`: Cấu hình container hóa cho Frappe (Backend) và Vue (Frontend).
 
 ## Yêu cầu hệ thống
 - [Docker](https://docs.docker.com/get-docker/)
@@ -32,8 +33,16 @@ docker-compose up --build
 ```
 
 ### 3. Truy cập ứng dụng
-- **Giao diện Web (Streamlit)**: [http://localhost:8501](http://localhost:8501)
+- **Giao diện Web (Vue 3)**: [http://localhost](http://localhost) (Port 80)
 - **API Backend (Frappe)**: [http://localhost:8000/api/method/ct_datalake.ct_datalake.api.root](http://localhost:8000/api/method/ct_datalake.ct_datalake.api.root)
+
+## Phát triển Frontend cục bộ
+Nếu bạn muốn phát triển frontend mà không dùng Docker:
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
 ## API Endpoints (Frappe)
 Tất cả API được truy cập qua prefix `/api/method/ct_datalake.ct_datalake.api.`:

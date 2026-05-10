@@ -15,7 +15,7 @@ from typing import Literal
 
 from openai import OpenAI
 
-from search import search
+from .search import search
 
 # ========================
 # CONFIG

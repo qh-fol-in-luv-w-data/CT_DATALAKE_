@@ -21,5 +21,5 @@ COPY . .
 # Setup environment variables
 ENV OPENAI_API_KEY=""
 
-# The CMD will be overridden by docker-compose for different services
-CMD ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+# Default to serving the Frappe API
+CMD ["python", "-m", "frappe.utils.bench_helper", "frappe", "serve", "--port", "8000"]

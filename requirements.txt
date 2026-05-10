@@ -7,5 +7,4 @@ deep-translator
 PyMuPDF
 pypdf
 python-docx
-streamlit
 requests
