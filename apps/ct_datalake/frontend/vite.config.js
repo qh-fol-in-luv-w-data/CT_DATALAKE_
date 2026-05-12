@@ -10,7 +10,6 @@ export default defineConfig({
         target: 'http://localhost:8000', // Update this to match your Frappe port
         changeOrigin: true,
         secure: false,
-        headers: { 'Host': 'mysite2.localhost' },
       }
     }
   }
